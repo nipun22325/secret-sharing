@@ -16,14 +16,14 @@ The service provides a REST API built with FastAPI and uses MongoDB for temporar
 
 ## Features
 
-🔥 Burn After Reading: Secrets are automatically destroyed after they are viewed and their TTL runs out
-⏰ Time-based Expiration: Set custom TTL (1-168 hours) for secrets
-🔒 Password Protection: Optional password protection for sensitive secrets
-📱 QR Code Generation: Automatic QR codes for easy mobile sharing
-🔐 End-to-End Encryption: All secrets encrypted with Fernet symmetric encryption
-📊 Usage Statistics: Track total secrets created, viewed, and active
-🧹 Auto-cleanup: Automatic removal of expired secrets
-🌐 CORS Enabled: Ready for web frontend integration
+- 🔥 Burn After Reading: Secrets are automatically destroyed after they are viewed and their TTL runs out
+- ⏰ Time-based Expiration: Set custom TTL (1-168 hours) for secrets
+- 🔒 Password Protection: Optional password protection for sensitive secrets
+- 📱 QR Code Generation: Automatic QR codes for easy mobile sharing
+- 🔐 End-to-End Encryption: All secrets encrypted with Fernet symmetric encryption
+- 📊 Usage Statistics: Track total secrets created, viewed, and active
+- 🧹 Auto-cleanup: Automatic removal of expired secrets
+- 🌐 CORS Enabled: Ready for web frontend integration
 
 ## Requirements
 
