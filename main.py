@@ -96,6 +96,12 @@ def generate_qr_code(url: str) -> str:
     return base64.b64encode(buffer.getvalue()).decode()
 
 async def cleanup_expired_secrets():
+    """
+    Deletes expired secrets from the database.
+
+    Returns:
+        int: The number of secrets that were deleted.
+    """
     current_time = datetime.utcnow()
     result = await asyncio.to_thread(
         secrets_collection.delete_many,
@@ -105,6 +111,9 @@ async def cleanup_expired_secrets():
 
 @app.on_event("startup")
 async def startup_event():
+    """
+    Initializes database indexes and sets up initial statistics on application startup.
+    """
     await asyncio.to_thread(secrets_collection.create_index, "secret_id", unique=True)
     await asyncio.to_thread(secrets_collection.create_index, "expires_at", expireAfterSeconds=0)
     existing_stats = await asyncio.to_thread(stats_collection.find_one, {"_id": "global"})
@@ -116,6 +125,15 @@ async def startup_event():
 
 @app.post("/api/secrets", response_model=SecretResponse)
 async def create_secret(secret_data: SecretCreate):
+    """
+    Creates a new encrypted secret with optional password protection and time-to-live.
+
+    Args:
+        secret_data (SecretCreate): The secret payload and settings.
+
+    Returns:
+        SecretResponse: Metadata including ID, expiration time, and a QR code.
+    """
     while True:
         secret_id = generate_secret_id()
         existing = await asyncio.to_thread(secrets_collection.find_one, {"secret_id": secret_id})
@@ -152,6 +170,19 @@ async def create_secret(secret_data: SecretCreate):
 
 @app.post("/api/secrets/{secret_id}", response_model=SecretContent)
 async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetrieve()):
+    """
+    Retrieves and decrypts a secret if it exists and hasn't been viewed.
+
+    Args:
+        secret_id (str): The unique identifier of the secret.
+        retrieve_data (SecretRetrieve): Optional password data for validation.
+
+    Returns:
+        SecretContent: The decrypted secret and metadata.
+
+    Raises:
+        HTTPException: If the secret is not found, expired, viewed, or password is incorrect.
+    """
     await cleanup_expired_secrets()
     secret_doc = await asyncio.to_thread(secrets_collection.find_one, {"secret_id": secret_id})
 
@@ -172,8 +203,8 @@ async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetri
             secret_doc["encrypted_content"],
             secret_doc["nonce"]
         )
-    except Exception:
-        raise HTTPException(status_code=500, detail="Failed to decrypt secret")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to decrypt secret") from exc
 
     await asyncio.to_thread(
         secrets_collection.update_one,
@@ -194,6 +225,15 @@ async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetri
 
 @app.get("/api/secrets/{secret_id}/info")
 async def get_secret_info(secret_id: str):
+    """
+    Returns metadata for a given secret without revealing its content.
+
+    Args:
+        secret_id (str): The unique identifier of the secret.
+
+    Returns:
+        dict: Info including timestamps, protection, and view status.
+    """
     secret_doc = await asyncio.to_thread(
         secrets_collection.find_one,
         {"secret_id": secret_id},
@@ -213,6 +253,12 @@ async def get_secret_info(secret_id: str):
 
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_stats():
+    """
+    Returns usage statistics such as total secrets created/viewed and currently active secrets.
+
+    Returns:
+        StatsResponse: Statistics object with aggregated counters.
+    """
     await cleanup_expired_secrets()
     stats_doc = await asyncio.to_thread(stats_collection.find_one, {"_id": "global"})
     active_count = await asyncio.to_thread(secrets_collection.count_documents, {})
@@ -228,6 +274,12 @@ async def get_stats():
 
 @app.delete("/api/admin/cleanup")
 async def cleanup_expired():
+    """
+    Manually triggers cleanup of all expired secrets.
+
+    Returns:
+        dict: Count of deleted documents.
+    """
     deleted_count = await cleanup_expired_secrets()
     return {"deleted_count": deleted_count}
 
