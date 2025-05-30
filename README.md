@@ -1,6 +1,6 @@
 # 🔐 Phantom Share
 
-A secure, self-destructing secret sharing service built with FastAPI and MongoDB. Share sensitive information with automatic expiration and "burn after reading" functionality.
+A secure, self-destructing secret sharing service built with FastAPI and MongoDB using the ChaCha20Poly1305 encryption scheme. Share sensitive information with automatic expiration and "burn after reading" functionality.
 
 ## Overview
 
@@ -72,7 +72,7 @@ The API will be available at `http://127.0.0.1:8000`
 
 ```bash
 # Create a new secret
-curl -X POST "http://127.0.0.1:8000/api/secrets/" -H "Content-Type: application/json" -d "{"content": "This is a secret from curl", "ttl_hours": 24, "password_protected": true, "access_password" : "pass"}"
+curl -X POST "http://127.0.0.1:8000/api/secrets" -H "Content-Type: application/json" -d '{"content": "This is a secret from curl", "ttl_hours": 24, "password_protected": true, "access_password" : "pass"}'
 ```
 
 The response is like this:
@@ -110,7 +110,7 @@ The response is like this:
 
 ```bash
 # Retrieve a password protected secret
-curl -X POST http://127.0.0.1:8000/api/secrets/{secret_id} -H "Content-Type: application/json" -d "{"access_password": "pass"}"
+curl -X POST http://127.0.0.1:8000/api/secrets/{secret_id} -H "Content-Type: application/json" -d '{"access_password": "pass"}'
 ```
 
 The response is like this:

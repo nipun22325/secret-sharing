@@ -9,12 +9,11 @@ import string
 from datetime import datetime, timedelta
 from pymongo import MongoClient
 import asyncio
-from cryptography.fernet import Fernet
 import base64
 import qrcode
 import io
 import uvicorn
-
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 app = FastAPI(title="Disposable Secret Sharing API", version="1.0.0")
 
@@ -34,11 +33,15 @@ db = client["secrets_db"]
 secrets_collection = db.secrets
 stats_collection = db.stats
 
-# Encryption key
-# SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32)) #for production
-SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key-here") #for testing
-key = base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest())
-cipher_suite = Fernet(key)
+# Encryption key setup
+key_env = os.getenv("SECRET_ENCRYPTION_KEY")
+if key_env:
+    key = base64.b64decode(key_env)
+else:
+    key = ChaCha20Poly1305.generate_key()
+    print(f"Generated encryption key (store this securely!): {base64.b64encode(key).decode()}")
+
+chacha = ChaCha20Poly1305(key)
 
 # Pydantic models
 class SecretCreate(BaseModel):
@@ -72,26 +75,27 @@ def generate_secret_id(length: int = 8) -> str:
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-def encrypt_content(content: str) -> str:
-    return cipher_suite.encrypt(content.encode()).decode()
+def encrypt_content(content: str) -> tuple:
+    nonce = os.urandom(12)
+    encrypted = chacha.encrypt(nonce, content.encode(), None)
+    return base64.b64encode(encrypted).decode(), base64.b64encode(nonce).decode()
 
-def decrypt_content(encrypted_content: str) -> str:
-    return cipher_suite.decrypt(encrypted_content.encode()).decode()
+def decrypt_content(encrypted_content_b64: str, nonce_b64: str) -> str:
+    encrypted_content = base64.b64decode(encrypted_content_b64)
+    nonce = base64.b64decode(nonce_b64)
+    return chacha.decrypt(nonce, encrypted_content, None).decode()
 
 def generate_qr_code(url: str) -> str:
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
     qr.add_data(url)
     qr.make(fit=True)
-    
     img = qr.make_image(fill_color="black", back_color="white")
     buffer = io.BytesIO()
     img.save(buffer, format='PNG')
     buffer.seek(0)
-    
     return base64.b64encode(buffer.getvalue()).decode()
 
 async def cleanup_expired_secrets():
-    """Only clean up time-expired secrets, not viewed ones"""
     current_time = datetime.utcnow()
     result = await asyncio.to_thread(
         secrets_collection.delete_many,
@@ -101,25 +105,17 @@ async def cleanup_expired_secrets():
 
 @app.on_event("startup")
 async def startup_event():
-    # Create indexes
     await asyncio.to_thread(secrets_collection.create_index, "secret_id", unique=True)
     await asyncio.to_thread(secrets_collection.create_index, "expires_at", expireAfterSeconds=0)
-    
-    # Initialize stats if not exists
     existing_stats = await asyncio.to_thread(stats_collection.find_one, {"_id": "global"})
     if not existing_stats:
         await asyncio.to_thread(
             stats_collection.insert_one,
-            {
-                "_id": "global",
-                "total_created": 0,
-                "total_viewed": 0
-            }
+            {"_id": "global", "total_created": 0, "total_viewed": 0}
         )
 
 @app.post("/api/secrets", response_model=SecretResponse)
 async def create_secret(secret_data: SecretCreate):
-    # Generate unique secret ID
     while True:
         secret_id = generate_secret_id()
         existing = await asyncio.to_thread(secrets_collection.find_one, {"secret_id": secret_id})
@@ -127,11 +123,12 @@ async def create_secret(secret_data: SecretCreate):
             break
 
     expires_at = datetime.utcnow() + timedelta(hours=secret_data.ttl_hours)
-    encrypted_content = encrypt_content(secret_data.content)
+    encrypted_content, nonce = encrypt_content(secret_data.content)
 
     secret_doc = {
         "secret_id": secret_id,
         "encrypted_content": encrypted_content,
+        "nonce": nonce,
         "created_at": datetime.utcnow(),
         "expires_at": expires_at,
         "viewed": False,
@@ -148,7 +145,7 @@ async def create_secret(secret_data: SecretCreate):
         {"$inc": {"total_created": 1}}
     )
 
-    secret_url = f"http://localhost:8080/view/{secret_id}"
+    secret_url = f"http://localhost:8000/view/{secret_id}"
     qr_code = generate_qr_code(secret_url)
 
     return SecretResponse(secret_id=secret_id, expires_at=expires_at, qr_code=qr_code)
@@ -156,7 +153,6 @@ async def create_secret(secret_data: SecretCreate):
 @app.post("/api/secrets/{secret_id}", response_model=SecretContent)
 async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetrieve()):
     await cleanup_expired_secrets()
-
     secret_doc = await asyncio.to_thread(secrets_collection.find_one, {"secret_id": secret_id})
 
     if not secret_doc:
@@ -168,14 +164,15 @@ async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetri
     if secret_doc.get("password_protected", False):
         if not retrieve_data.access_password:
             raise HTTPException(status_code=401, detail="Password required")
-
-        provided_hash = hash_password(retrieve_data.access_password)
-        if provided_hash != secret_doc.get("password_hash"):
+        if hash_password(retrieve_data.access_password) != secret_doc.get("password_hash"):
             raise HTTPException(status_code=401, detail="Invalid password")
 
     try:
-        decrypted_content = decrypt_content(secret_doc["encrypted_content"])
-    except Exception as e:
+        decrypted_content = decrypt_content(
+            secret_doc["encrypted_content"],
+            secret_doc["nonce"]
+        )
+    except Exception:
         raise HTTPException(status_code=500, detail="Failed to decrypt secret")
 
     await asyncio.to_thread(
@@ -217,7 +214,6 @@ async def get_secret_info(secret_id: str):
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_stats():
     await cleanup_expired_secrets()
-
     stats_doc = await asyncio.to_thread(stats_collection.find_one, {"_id": "global"})
     active_count = await asyncio.to_thread(secrets_collection.count_documents, {})
 
