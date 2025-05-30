@@ -1,17 +1,25 @@
+"""
+main.py - A FastAPI-based service for secure, disposable secret sharing.
+
+This API allows clients to create secrets that can be retrieved only once and
+expire after a set duration. Optional password protection and QR code generation
+are supported.
+"""
+
+import os
+import io
+import asyncio
+import base64
+import string
+import hashlib
+from datetime import datetime, timedelta
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
-import os
-import hashlib
-import secrets
-import string
-from datetime import datetime, timedelta
 from pymongo import MongoClient
-import asyncio
-import base64
 import qrcode
-import io
 import uvicorn
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
@@ -26,7 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB setup (sync client)
+# MongoDB setup
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://admin:123456@localhost:27017/?authSource=admin")
 client = MongoClient(MONGODB_URL)
 db = client["secrets_db"]
@@ -43,49 +51,109 @@ else:
 
 chacha = ChaCha20Poly1305(key)
 
-# Pydantic models
+
 class SecretCreate(BaseModel):
+    """Model for creating a secret."""
     content: str = Field(..., min_length=1, max_length=10000)
     ttl_hours: Optional[int] = Field(default=24, ge=1, le=168)
     password_protected: Optional[bool] = False
     access_password: Optional[str] = None
 
+
 class SecretResponse(BaseModel):
+    """Model returned after a secret is created."""
     secret_id: str
     expires_at: datetime
     qr_code: Optional[str] = None
 
+
 class SecretRetrieve(BaseModel):
+    """Model used to retrieve a secret."""
     access_password: Optional[str] = None
 
+
 class SecretContent(BaseModel):
+    """Model containing decrypted secret content."""
     content: str
     created_at: datetime
     expires_at: datetime
 
+
 class StatsResponse(BaseModel):
+    """Model for statistics reporting."""
     total_secrets_created: int
     total_secrets_viewed: int
     active_secrets: int
 
+
 def generate_secret_id(length: int = 8) -> str:
+    """
+    Generates a random alphanumeric secret ID.
+
+    Args:
+        length (int): The desired length of the secret ID.
+
+    Returns:
+        str: A randomly generated string.
+    """
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
+
 def hash_password(password: str) -> str:
+    """
+    Hashes a password using SHA-256.
+
+    Args:
+        password (str): The plain text password.
+
+    Returns:
+        str: The hashed password.
+    """
     return hashlib.sha256(password.encode()).hexdigest()
 
+
 def encrypt_content(content: str) -> tuple:
+    """
+    Encrypts content using ChaCha20Poly1305.
+
+    Args:
+        content (str): Plain text content.
+
+    Returns:
+        tuple: A tuple of base64-encoded encrypted content and nonce.
+    """
     nonce = os.urandom(12)
     encrypted = chacha.encrypt(nonce, content.encode(), None)
     return base64.b64encode(encrypted).decode(), base64.b64encode(nonce).decode()
 
+
 def decrypt_content(encrypted_content_b64: str, nonce_b64: str) -> str:
+    """
+    Decrypts base64-encoded encrypted content using ChaCha20Poly1305.
+
+    Args:
+        encrypted_content_b64 (str): Base64 encoded ciphertext.
+        nonce_b64 (str): Base64 encoded nonce.
+
+    Returns:
+        str: Decrypted plain text.
+    """
     encrypted_content = base64.b64decode(encrypted_content_b64)
     nonce = base64.b64decode(nonce_b64)
     return chacha.decrypt(nonce, encrypted_content, None).decode()
 
+
 def generate_qr_code(url: str) -> str:
+    """
+    Generates a base64-encoded PNG QR code from a URL.
+
+    Args:
+        url (str): The URL to encode.
+
+    Returns:
+        str: Base64-encoded PNG image.
+    """
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
     qr.add_data(url)
     qr.make(fit=True)
@@ -94,6 +162,7 @@ def generate_qr_code(url: str) -> str:
     img.save(buffer, format='PNG')
     buffer.seek(0)
     return base64.b64encode(buffer.getvalue()).decode()
+
 
 async def cleanup_expired_secrets():
     """
@@ -109,6 +178,7 @@ async def cleanup_expired_secrets():
     )
     return result.deleted_count
 
+
 @app.on_event("startup")
 async def startup_event():
     """
@@ -123,16 +193,17 @@ async def startup_event():
             {"_id": "global", "total_created": 0, "total_viewed": 0}
         )
 
+
 @app.post("/api/secrets", response_model=SecretResponse)
 async def create_secret(secret_data: SecretCreate):
     """
-    Creates a new encrypted secret with optional password protection and time-to-live.
+    Creates a new encrypted secret with optional password protection and TTL.
 
     Args:
         secret_data (SecretCreate): The secret payload and settings.
 
     Returns:
-        SecretResponse: Metadata including ID, expiration time, and a QR code.
+        SecretResponse: Metadata including ID, expiration, and QR code.
     """
     while True:
         secret_id = generate_secret_id()
@@ -168,6 +239,7 @@ async def create_secret(secret_data: SecretCreate):
 
     return SecretResponse(secret_id=secret_id, expires_at=expires_at, qr_code=qr_code)
 
+
 @app.post("/api/secrets/{secret_id}", response_model=SecretContent)
 async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetrieve()):
     """
@@ -181,7 +253,7 @@ async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetri
         SecretContent: The decrypted secret and metadata.
 
     Raises:
-        HTTPException: If the secret is not found, expired, viewed, or password is incorrect.
+        HTTPException: If secret not found, expired, viewed, or invalid password.
     """
     await cleanup_expired_secrets()
     secret_doc = await asyncio.to_thread(secrets_collection.find_one, {"secret_id": secret_id})
@@ -223,6 +295,7 @@ async def get_secret(secret_id: str, retrieve_data: SecretRetrieve = SecretRetri
         expires_at=secret_doc["expires_at"]
     )
 
+
 @app.get("/api/secrets/{secret_id}/info")
 async def get_secret_info(secret_id: str):
     """
@@ -251,6 +324,7 @@ async def get_secret_info(secret_id: str):
         "viewed": secret_doc.get("viewed", False)
     }
 
+
 @app.get("/api/stats", response_model=StatsResponse)
 async def get_stats():
     """
@@ -272,6 +346,7 @@ async def get_stats():
         active_secrets=active_count
     )
 
+
 @app.delete("/api/admin/cleanup")
 async def cleanup_expired():
     """
@@ -283,9 +358,17 @@ async def cleanup_expired():
     deleted_count = await cleanup_expired_secrets()
     return {"deleted_count": deleted_count}
 
+
 @app.get("/")
 async def root():
+    """
+    Health check route for the API root.
+
+    Returns:
+        dict: A simple status message.
+    """
     return {"message": "Disposable Secret Sharing API is running"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
